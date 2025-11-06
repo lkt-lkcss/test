@@ -1,0 +1,298 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>HK Salary Tax Calculator</title>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body { 
+            font-family: Arial, sans-serif; 
+            background: #1e3a8a; 
+            padding: 20px;
+            min-height: 100vh;
+        }
+        .container { 
+            max-width: 600px; 
+            margin: 0 auto; 
+            background: white; 
+            padding: 30px; 
+            border-radius: 10px; 
+            box-shadow: 0 5px 15px rgba(0,0,0,0.2);
+        }
+        h1 { 
+            text-align: center; 
+            color: white; 
+            background: #1e40af; 
+            padding: 20px; 
+            margin: -30px -30px 20px -30px;
+            border-radius: 10px 10px 0 0;
+        }
+        .form-group { 
+            margin-bottom: 20px; 
+        }
+        label { 
+            display: block; 
+            margin-bottom: 8px; 
+            font-weight: bold; 
+            color: #1e3a8a;
+        }
+        input { 
+            width: 100%; 
+            padding: 12px; 
+            border: 2px solid #cbd5e0; 
+            border-radius: 5px; 
+            font-size: 16px;
+        }
+        input:focus {
+            border-color: #1e40af;
+            outline: none;
+        }
+        button { 
+            width: 100%; 
+            padding: 15px; 
+            background: #dc2626; 
+            color: white; 
+            border: none; 
+            border-radius: 5px; 
+            font-size: 18px; 
+            cursor: pointer; 
+            margin: 10px 0; 
+            font-weight: bold;
+        }
+        button:hover { 
+            background: #b91c1c; 
+        }
+        .results { 
+            background: #f8fafc; 
+            padding: 25px; 
+            border-radius: 8px; 
+            margin-top: 25px; 
+            display: none;
+            border-left: 4px solid #dc2626;
+        }
+        .results h2 {
+            color: #1e3a8a;
+            margin-bottom: 20px;
+            text-align: center;
+        }
+        .summary-box {
+            background: white;
+            padding: 20px;
+            border-radius: 8px;
+            margin-bottom: 20px;
+            border: 2px solid #e2e8f0;
+        }
+        .result-row { 
+            display: flex; 
+            justify-content: space-between; 
+            margin-bottom: 12px; 
+            padding: 10px;
+            border-bottom: 1px solid #e2e8f0;
+        }
+        .highlight { 
+            font-weight: bold; 
+            font-size: 18px; 
+            color: #1e3a8a;
+        }
+        .tax-breakdown {
+            background: white;
+            padding: 20px;
+            border-radius: 8px;
+            margin: 20px 0;
+            border: 1px solid #e2e8f0;
+        }
+        .tax-bracket {
+            display: flex;
+            justify-content: space-between;
+            margin: 8px 0;
+            padding: 8px 12px;
+            background: #f8fafc;
+            border-radius: 5px;
+        }
+        .bracket-header {
+            font-weight: bold;
+            background: #e2e8f0;
+            color: #1e3a8a;
+        }
+        .final-tax {
+            background: #dc2626;
+            color: white;
+            padding: 25px;
+            border-radius: 8px;
+            text-align: center;
+            margin-top: 20px;
+            font-size: 24px;
+            font-weight: bold;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>🇭🇰 Hong Kong Salary Tax Calculator</h1>
+        
+        <div class="input-section">
+            <div class="form-group">
+                <label for="income">Annual Income (HKD):</label>
+                <input type="number" id="income" placeholder="Enter your annual income">
+            </div>
+            
+            <div class="form-group">
+                <label for="allowance">Tax Allowance (HKD):</label>
+                <input type="number" id="allowance" placeholder="Enter tax allowance" value="132000">
+            </div>
+            
+            <button onclick="calculateTax()">Calculate Salary Tax</button>
+        </div>
+        
+        <div class="results" id="results">
+            <h2>📊 Salary Tax Calculation Results</h2>
+            
+            <div class="summary-box">
+                <div class="result-row">
+                    <span>Annual Income:</span>
+                    <span id="resultIncome">-</span>
+                </div>
+                <div class="result-row">
+                    <span>Tax Allowance:</span>
+                    <span id="resultAllowance">-</span>
+                </div>
+                <div class="result-row highlight">
+                    <span>Net Chargeable Income:</span>
+                    <span id="resultChargeable">-</span>
+                </div>
+            </div>
+            
+            <div class="tax-breakdown">
+                <h3>Progressive Tax Calculation:</h3>
+                <div class="tax-bracket bracket-header">
+                    <span>Tax Bracket</span>
+                    <span>Tax Amount</span>
+                </div>
+                <div id="taxBrackets"></div>
+                <div class="tax-bracket highlight" style="border-top: 2px solid #1e3a8a; margin-top: 10px;">
+                    <span>Total Salary Tax:</span>
+                    <span id="totalTax">-</span>
+                </div>
+            </div>
+            
+            <div class="final-tax">
+                Salary Tax Payable: <span id="finalTax">-</span>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        function calculateTax() {
+            // Get input values
+            const income = parseFloat(document.getElementById('income').value);
+            const allowance = parseFloat(document.getElementById('allowance').value);
+            
+            // Validate inputs
+            if (!income || income < 0) {
+                alert('Please enter a valid annual income amount');
+                return;
+            }
+            
+            if (!allowance || allowance < 0) {
+                alert('Please enter a valid tax allowance amount');
+                return;
+            }
+            
+            // Calculate net chargeable income
+            let netChargeable = income - allowance;
+            if (netChargeable < 0) netChargeable = 0;
+            
+            // Calculate progressive tax
+            const tax = calculateProgressiveTax(netChargeable);
+            
+            // Display results
+            displayResults(income, allowance, netChargeable, tax);
+            
+            // Show results section
+            document.getElementById('results').style.display = 'block';
+        }
+        
+        function calculateProgressiveTax(income) {
+            if (income <= 0) {
+                return { totalTax: 0, brackets: [] };
+            }
+            
+            // Hong Kong progressive tax brackets
+            const brackets = [
+                { lower: 0, upper: 50000, rate: 0.02, description: "First $50,000 at 2%" },
+                { lower: 50000, upper: 100000, rate: 0.06, description: "Next $50,000 at 6%" },
+                { lower: 100000, upper: 150000, rate: 0.10, description: "Next $50,000 at 10%" },
+                { lower: 150000, upper: 200000, rate: 0.14, description: "Next $50,000 at 14%" },
+                { lower: 200000, upper: Infinity, rate: 0.17, description: "Remainder at 17%" }
+            ];
+            
+            let totalTax = 0;
+            let remainingIncome = income;
+            const bracketCalculations = [];
+            
+            for (let bracket of brackets) {
+                if (remainingIncome <= 0) break;
+                
+                const bracketRange = bracket.upper - bracket.lower;
+                const taxableInBracket = Math.min(remainingIncome, bracketRange);
+                
+                if (taxableInBracket > 0) {
+                    const taxInBracket = taxableInBracket * bracket.rate;
+                    totalTax += taxInBracket;
+                    
+                    bracketCalculations.push({
+                        description: bracket.description,
+                        tax: taxInBracket
+                    });
+                    
+                    remainingIncome -= taxableInBracket;
+                }
+            }
+            
+            return { totalTax: totalTax, brackets: bracketCalculations };
+        }
+        
+        function displayResults(income, allowance, netChargeable, taxResult) {
+            // Format currency function
+            const formatMoney = (amount) => {
+                return 'HK$' + amount.toFixed(0).replace(/\B(?=(\d{3})+(?!\d))/g, ',');
+            };
+            
+            // Display basic information
+            document.getElementById('resultIncome').textContent = formatMoney(income);
+            document.getElementById('resultAllowance').textContent = formatMoney(allowance);
+            document.getElementById('resultChargeable').textContent = formatMoney(netChargeable);
+            
+            // Display tax brackets
+            let bracketsHTML = '';
+            
+            if (taxResult.brackets.length === 0) {
+                bracketsHTML = '<div class="tax-bracket">No tax - Net chargeable income is zero or negative</div>';
+            } else {
+                taxResult.brackets.forEach(bracket => {
+                    bracketsHTML += `<div class="tax-bracket">`;
+                    bracketsHTML += `<span>${bracket.description}</span>`;
+                    bracketsHTML += `<span>${formatMoney(bracket.tax)}</span>`;
+                    bracketsHTML += `</div>`;
+                });
+            }
+            
+            document.getElementById('taxBrackets').innerHTML = bracketsHTML;
+            document.getElementById('totalTax').textContent = formatMoney(taxResult.totalTax);
+            document.getElementById('finalTax').textContent = formatMoney(taxResult.totalTax);
+        }
+        
+        // Allow pressing Enter to calculate
+        document.getElementById('income').addEventListener('keypress', function(e) {
+            if (e.key === 'Enter') {
+                calculateTax();
+            }
+        });
+        
+        document.getElementById('allowance').addEventListener('keypress', function(e) {
+            if (e.key === 'Enter') {
+                calculateTax();
+            }
+        });
+    </script>
+</body>
+</html>
