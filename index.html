@@ -348,7 +348,7 @@
 <body>
     <div class="container">
         <header>
-            <h1>Hong Kong Salary Tax Calculator - By LW</h1>
+            <h1>Hong Kong Salary Tax Calculator by LW</h1>
             <p class="subtitle">Learn how to calculate salary tax with our interactive tool</p>
         </header>
         
@@ -549,9 +549,10 @@
             let remainingIncome = income;
             const bracketCalculations = [];
             
-            for (let bracket of brackets) {
+            for (let i = 0; i < brackets.length; i++) {
                 if (remainingIncome <= 0) break;
                 
+                const bracket = brackets[i];
                 const bracketRange = bracket.upper - bracket.lower;
                 const taxableInBracket = Math.min(remainingIncome, bracketRange);
                 
@@ -559,8 +560,21 @@
                     const taxInBracket = taxableInBracket * bracket.rate;
                     totalTax += taxInBracket;
                     
+                    // Custom description for partial amounts in any bracket
+                    let description;
+                    if (i === 0) {
+                        // First bracket
+                        description = `First $${taxableInBracket.toLocaleString()} at ${Math.round(bracket.rate * 100)}%`;
+                    } else if (taxableInBracket < bracketRange) {
+                        // Partial amount in subsequent brackets
+                        description = `Next $${taxableInBracket.toLocaleString()} at ${Math.round(bracket.rate * 100)}%`;
+                    } else {
+                        // Full bracket amount
+                        description = bracket.description;
+                    }
+                    
                     bracketCalculations.push({
-                        description: bracket.description,
+                        description: description,
                         tax: taxInBracket
                     });
                     
@@ -616,5 +630,3 @@
     </script>
 </body>
 </html>
-
-
