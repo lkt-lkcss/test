@@ -1,0 +1,1136 @@
+import React, { useState, useEffect, useRef, useMemo } from 'react';
+import { Settings, Trash2, MousePointer2, Zap, Activity, Circle, Slash, AlertCircle, Bot, Loader2, Undo2, RotateCcw, MessageSquare, Send, Sparkles, TrendingUp, ArrowLeftRight, Move3d } from 'lucide-react';
+
+const apiKey = "";
+
+// --- Gemini API Helper with Exponential Backoff ---
+async function fetchWithRetry(url, options, retries = 5) {
+  const delays = [1000, 2000, 4000, 8000, 16000];
+  for (let i = 0; i < retries; i++) {
+    try {
+      const response = await fetch(url, options);
+      if (!response.ok) throw new Error(`HTTP error! status: ${response.status}`);
+      return await response.json();
+    } catch (e) {
+      if (i === retries - 1) throw e;
+      await new Promise(res => setTimeout(res, delays[i]));
+    }
+  }
+}
+
+// --- Physics Engine: Linear Algebra Solver ---
+function solveLinearSystem(A, b) {
+  const n = A.length;
+  const x = new Array(n).fill(0);
+  const mat = A.map(row => [...row]);
+  const rhs = [...b];
+
+  for (let i = 0; i < n; i++) {
+    let maxEl = Math.abs(mat[i][i]), maxRow = i;
+    for (let k = i + 1; k < n; k++) {
+      if (Math.abs(mat[k][i]) > maxEl) { maxEl = Math.abs(mat[k][i]); maxRow = k; }
+    }
+
+    [mat[i], mat[maxRow]] = [mat[maxRow], mat[i]];
+    [rhs[i], rhs[maxRow]] = [rhs[maxRow], rhs[i]];
+
+    if (Math.abs(mat[i][i]) < 1e-12) return null;
+
+    for (let k = i + 1; k < n; k++) {
+      const c = -mat[k][i] / mat[i][i];
+      for (let j = i; j < n; j++) {
+        if (i === j) mat[k][j] = 0;
+        else mat[k][j] += c * mat[i][j];
+      }
+      rhs[k] += c * rhs[i];
+    }
+  }
+
+  for (let i = n - 1; i >= 0; i--) {
+    x[i] = rhs[i] / mat[i][i];
+    for (let k = i - 1; k >= 0; k--) {
+      rhs[k] -= mat[k][i] * x[i];
+    }
+  }
+  return x;
+}
+
+// --- Physics Engine: Circuit Nodal Analysis ---
+const solveCircuit = (components) => {
+  const nodes = new Set();
+  components.forEach(c => { nodes.add(c.n1); nodes.add(c.n2); });
+  const nodeList = Array.from(nodes);
+  const N = nodeList.length;
+  
+  if (N === 0) return { voltages: {}, currents: {}, readings: {} };
+
+  const A = Array.from({ length: N }, () => new Array(N).fill(0));
+  const b = new Array(N).fill(0);
+
+  for (let i = 0; i < N; i++) A[i][i] += 1e-6;
+
+  components.forEach(c => {
+    const i = nodeList.indexOf(c.n1);
+    const j = nodeList.indexOf(c.n2);
+    
+    let R = 1e-6; 
+    let E = 0;    
+
+    if (c.type === 'resistor') R = Math.max(c.val || 1e-6, 1e-6);
+    if (c.type === 'voltmeter') R = Infinity;
+    if (c.type === 'battery') E = c.val || 0;
+
+    const G = 1 / R;
+
+    A[i][i] += G; 
+    A[j][j] += G;
+    A[i][j] -= G; 
+    A[j][i] -= G;
+
+    const I_norton = E * G;
+    b[i] += I_norton;
+    b[j] -= I_norton;
+  });
+
+  const x = solveLinearSystem(A, b);
+  if (!x) return { voltages: {}, currents: {}, readings: {}, error: true };
+
+  const voltages = {};
+  nodeList.forEach((n, idx) => { voltages[n] = x[idx]; });
+
+  const currents = {};
+  const readings = {};
+
+  components.forEach(c => {
+    const v1 = voltages[c.n1];
+    const v2 = voltages[c.n2];
+    
+    let R = 1e-6;
+    let E = 0;
+    if (c.type === 'resistor') R = Math.max(c.val || 1e-6, 1e-6);
+    if (c.type === 'voltmeter') R = Infinity;
+    if (c.type === 'battery') E = c.val || 0;
+
+    const branchCurrent = R === Infinity ? 0 : (v1 - v2 - E) / R; 
+    currents[c.id] = Math.abs(branchCurrent);
+
+    if (c.type === 'voltmeter') readings[c.id] = v1 - v2;
+    if (c.type === 'ammeter') readings[c.id] = Math.abs(branchCurrent);
+  });
+
+  return { voltages, currents, readings, error: false };
+};
+
+
+// --- Message Formatter for LaTeX & Markdown ---
+const FormattedMessage = ({ text }) => {
+  const [isKatexLoaded, setIsKatexLoaded] = useState(typeof window !== 'undefined' && !!window.katex);
+
+  useEffect(() => {
+    if (isKatexLoaded) return;
+    const interval = setInterval(() => {
+      if (window.katex) {
+        setIsKatexLoaded(true);
+        clearInterval(interval);
+      }
+    }, 100);
+    return () => clearInterval(interval);
+  }, [isKatexLoaded]);
+
+  if (!isKatexLoaded) {
+    return <span className="whitespace-pre-wrap">{text}</span>;
+  }
+
+  // Split by Display Math ($$) and Inline Math ($)
+  const parts = text.split(/(\$\$[\s\S]*?\$\$|\$[\s\S]*?\$)/g);
+  
+  return (
+    <span className="whitespace-pre-wrap">
+      {parts.map((part, index) => {
+        if (part.startsWith('$$') && part.endsWith('$$')) {
+          const math = part.slice(2, -2);
+          try {
+            const html = window.katex.renderToString(math, { displayMode: true, throwOnError: false });
+            return <span key={index} dangerouslySetInnerHTML={{ __html: html }} className="block my-2 text-center" />;
+          } catch (e) {
+            return <span key={index}>{part}</span>;
+          }
+        } else if (part.startsWith('$') && part.endsWith('$')) {
+          const math = part.slice(1, -1);
+          try {
+            const html = window.katex.renderToString(math, { displayMode: false, throwOnError: false });
+            return <span key={index} dangerouslySetInnerHTML={{ __html: html }} />;
+          } catch (e) {
+            return <span key={index}>{part}</span>;
+          }
+        }
+        
+        // Handle basic bold markdown for normal text
+        const boldParts = part.split(/(\*\*[\s\S]*?\*\*)/g);
+        return (
+          <React.Fragment key={index}>
+            {boldParts.map((bp, i) => {
+              if (bp.startsWith('**') && bp.endsWith('**')) {
+                return <strong key={i} className="font-bold text-slate-100">{bp.slice(2, -2)}</strong>;
+              }
+              return <React.Fragment key={i}>{bp}</React.Fragment>;
+            })}
+          </React.Fragment>
+        );
+      })}
+    </span>
+  );
+};
+
+
+// --- 3D Roller Coaster Analogy Component ---
+const parseNode = (nodeStr) => {
+  const [x, y] = nodeStr.split(',').map(Number);
+  return { x, y };
+};
+
+const RollerCoasterView = ({ components, simResult }) => {
+  const { voltages, currents, error } = simResult;
+
+  // Free 3D Camera State
+  const [camAngle, setCamAngle] = useState({ yaw: -Math.PI / 4, pitch: Math.PI / 6 });
+  const [isDragging, setIsDragging] = useState(false);
+  const [lastPos, setLastPos] = useState({ x: 0, y: 0 });
+
+  const handlePointerDown = (e) => {
+    setIsDragging(true);
+    setLastPos({ x: e.clientX, y: e.clientY });
+    e.currentTarget.setPointerCapture(e.pointerId);
+  };
+
+  const handlePointerMove = (e) => {
+    if (!isDragging) return;
+    const deltaX = e.clientX - lastPos.x;
+    const deltaY = e.clientY - lastPos.y;
+    setCamAngle(prev => ({
+      yaw: prev.yaw - deltaX * 0.01,
+      // Clamp pitch between slightly above 0 and 90 degrees
+      pitch: Math.max(0.05, Math.min(Math.PI / 2 - 0.05, prev.pitch - deltaY * 0.01))
+    }));
+    setLastPos({ x: e.clientX, y: e.clientY });
+  };
+
+  const handlePointerUp = (e) => {
+    setIsDragging(false);
+    e.currentTarget.releasePointerCapture(e.pointerId);
+  };
+
+  if (components.length === 0) {
+    return (
+      <div className="bg-[#0f172a] border border-slate-800 rounded-2xl shadow-2xl relative w-full h-[400px] xl:h-[600px] flex items-center justify-center overflow-hidden">
+        <p className="text-slate-500 flex flex-col items-center gap-2">
+          <TrendingUp className="w-8 h-8 text-slate-600" />
+          Draw a circuit to view 3D model
+        </p>
+      </div>
+    );
+  }
+
+  if (error) {
+    return (
+      <div className="bg-[#0f172a] border border-slate-800 rounded-2xl shadow-2xl relative w-full h-[400px] xl:h-[600px] flex items-center justify-center overflow-hidden">
+        <p className="text-red-500/80 flex flex-col items-center gap-2">
+          <AlertCircle className="w-8 h-8" />
+          Circuit error prevents 3D render
+        </p>
+      </div>
+    );
+  }
+
+  // Calculate Map Bounds
+  const nodes = components.flatMap(c => [parseNode(c.n1), parseNode(c.n2)]);
+  const xs = nodes.map(n => n.x);
+  const ys = nodes.map(n => n.y);
+  const minX = Math.min(...xs), maxX = Math.max(...xs);
+  const minY = Math.min(...ys), maxY = Math.max(...ys);
+  const cx = (minX + maxX) / 2;
+  const cy = (minY + maxY) / 2;
+
+  // Plane Size (pad bounding box)
+  const pad = 80;
+  const pMinX = minX - cx - pad, pMaxX = maxX - cx + pad;
+  const pMinY = minY - cy - pad, pMaxY = maxY - cy + pad;
+
+  // ABSOLUTE Z Scaling (fixes Issue: Height reflecting Voltage accurately)
+  const vs = Object.values(voltages);
+  const minV = Math.min(...vs, 0);
+  const zScale = 20; // Exact pixels per volt. A 100V circuit will be 2000px tall!
+
+  // Full 3D Projection Function based on Dynamic Camera Angles
+  const toIso = (x, y, z) => {
+    const dx = x - cx;
+    const dy = y - cy;
+    
+    // Rotate around Z axis (Yaw)
+    const rx = dx * Math.cos(camAngle.yaw) - dy * Math.sin(camAngle.yaw);
+    const ry = dx * Math.sin(camAngle.yaw) + dy * Math.cos(camAngle.yaw);
+    
+    // Rotate around X axis (Pitch)
+    const dz = z * zScale - minV * zScale;
+    const px = rx;
+    const py = ry * Math.cos(camAngle.pitch) - dz * Math.sin(camAngle.pitch);
+    
+    return { x: px, y: py };
+  };
+
+  const planeCorners = (z) => [
+    toIso(cx + pMinX, cy + pMinY, z),
+    toIso(cx + pMaxX, cy + pMinY, z),
+    toIso(cx + pMaxX, cy + pMaxY, z),
+    toIso(cx + pMinX, cy + pMaxY, z)
+  ];
+
+  const levels = Array.from(new Set(vs.map(v => Math.round(v * 10) / 10)));
+
+  // Dynamic ViewBox Calculation (Automatically zooms camera out for tall circuits)
+  let isoMinX = Infinity, isoMaxX = -Infinity;
+  let isoMinY = Infinity, isoMaxY = -Infinity;
+  
+  const addPt = (p) => {
+    if (p.x < isoMinX) isoMinX = p.x;
+    if (p.x > isoMaxX) isoMaxX = p.x;
+    if (p.y < isoMinY) isoMinY = p.y;
+    if (p.y > isoMaxY) isoMaxY = p.y;
+  };
+
+  levels.forEach(l => planeCorners(l).forEach(addPt));
+  components.forEach(c => {
+    addPt(toIso(parseNode(c.n1).x, parseNode(c.n1).y, voltages[c.n1] || 0));
+    addPt(toIso(parseNode(c.n2).x, parseNode(c.n2).y, voltages[c.n2] || 0));
+    addPt(toIso(parseNode(c.n1).x, parseNode(c.n1).y, minV)); // Add Ground shadows to bounds
+    addPt(toIso(parseNode(c.n2).x, parseNode(c.n2).y, minV));
+  });
+
+  const vbPad = 60;
+  const vbWidth = Math.max(800, isoMaxX - isoMinX + vbPad * 2);
+  const vbHeight = Math.max(600, isoMaxY - isoMinY + vbPad * 2);
+  const scaleFactor = Math.max(1, Math.max(vbWidth / 800, vbHeight / 600)); // Keeps strokes thick when zoomed out
+
+  // Depth Sorting based on rotated camera coordinates (Back to Front)
+  const getDepth = (x, y) => {
+    const dx = x - cx;
+    const dy = y - cy;
+    // Y-axis distance relative to the camera after yaw rotation
+    return dx * Math.sin(camAngle.yaw) + dy * Math.cos(camAngle.yaw);
+  };
+
+  const depth = (c) => {
+     const n1 = parseNode(c.n1), n2 = parseNode(c.n2);
+     // Depth is the center of the component
+     return getDepth((n1.x + n2.x) / 2, (n1.y + n2.y) / 2);
+  };
+  
+  const sortedComps = [...components].sort((a, b) => depth(a) - depth(b));
+
+  return (
+    <div className="bg-[#0f172a] border border-slate-800 rounded-2xl shadow-2xl relative w-full h-[400px] xl:h-[600px] overflow-hidden select-none">
+      
+      {/* Overlay Legend */}
+      <div className="absolute top-4 left-4 bg-slate-900/80 backdrop-blur border border-slate-700/50 px-3 py-2 rounded-lg text-xs font-mono text-slate-300 z-10 pointer-events-none">
+        <div className="font-bold text-white mb-2 flex items-center gap-2"><TrendingUp className="w-4 h-4 text-orange-400" /> Roller Coaster Analogy</div>
+        <div className="grid grid-cols-2 gap-x-4 gap-y-1 text-[10px] text-slate-400">
+          <span>Height</span> <span className="text-right text-orange-400">Voltage Drop</span>
+          <span>Flow Speed</span> <span className="text-right text-yellow-400">Current</span>
+          <span>Lift Hill</span> <span className="text-right text-green-400">Battery</span>
+          <span>Slope</span> <span className="text-right text-red-400">Resistor</span>
+          <span>Flat Path</span> <span className="text-right text-slate-400">Wire</span>
+        </div>
+      </div>
+
+      {/* Free Look Hint */}
+      <div className="absolute bottom-4 right-4 bg-slate-900/80 backdrop-blur border border-slate-700/50 px-3 py-2 rounded-lg text-xs font-bold text-slate-400 z-10 pointer-events-none flex items-center gap-2">
+        <Move3d className="w-4 h-4" /> Drag to Rotate
+      </div>
+
+      <svg 
+        viewBox={`${isoMinX - vbPad} ${isoMinY - vbPad} ${vbWidth} ${vbHeight}`} 
+        className="w-full h-full block cursor-grab active:cursor-grabbing"
+        onPointerDown={handlePointerDown}
+        onPointerMove={handlePointerMove}
+        onPointerUp={handlePointerUp}
+        onPointerLeave={handlePointerUp}
+      >
+        {/* Render Translucent Voltage Planes */}
+        {levels.map((level, i) => (
+          <polygon
+            key={`plane-${i}`}
+            points={planeCorners(level).map(p => `${p.x},${p.y}`).join(' ')}
+            fill="rgba(249, 115, 22, 0.05)"
+            stroke="rgba(249, 115, 22, 0.2)"
+            strokeWidth={1 * scaleFactor}
+          />
+        ))}
+
+        {/* Render Components */}
+        {sortedComps.map((c) => {
+          const n1 = parseNode(c.n1);
+          const n2 = parseNode(c.n2);
+          const v1 = voltages[c.n1] || 0;
+          const v2 = voltages[c.n2] || 0;
+
+          // Calculate Center Path
+          const pt1 = toIso(n1.x, n1.y, v1);
+          const pt2 = toIso(n2.x, n2.y, v2);
+
+          // Calculate Flat Path Geometry in true 3D/Isometric space
+          const W = 12; // Half-width of the track in circuit grid units
+          const dx2d = n2.x - n1.x;
+          const dy2d = n2.y - n1.y;
+          const len2d = Math.hypot(dx2d, dy2d) || 1;
+          const nx = (-dy2d / len2d) * W;
+          const ny = (dx2d / len2d) * W;
+
+          // 4 corners of the elevated track polygon
+          const pLeft1 = toIso(n1.x + nx, n1.y + ny, v1);
+          const pRight1 = toIso(n1.x - nx, n1.y - ny, v1);
+          const pRight2 = toIso(n2.x - nx, n2.y - ny, v2);
+          const pLeft2 = toIso(n2.x + nx, n2.y + ny, v2);
+
+          // 4 corners of the ground shadow polygon
+          const gLeft1 = toIso(n1.x + nx, n1.y + ny, minV);
+          const gRight1 = toIso(n1.x - nx, n1.y - ny, minV);
+          const gRight2 = toIso(n2.x - nx, n2.y - ny, minV);
+          const gLeft2 = toIso(n2.x + nx, n2.y + ny, minV);
+
+          const isBattery = c.type === 'battery';
+          const isResistor = c.type === 'resistor';
+          
+          let trackColor = '#64748b'; // Slate grey for Wires
+          if (isBattery) trackColor = '#22c55e';
+          if (isResistor) trackColor = '#ef4444';
+          if (c.type === 'ammeter' || c.type === 'voltmeter') trackColor = '#3b82f6';
+
+          let R = 1e-6; let E = 0;
+          if (isResistor) R = Math.max(c.val || 1e-6, 1e-6);
+          if (c.type === 'voltmeter') R = Infinity;
+          if (isBattery) E = c.val || 0;
+
+          const branchCurrent = R === Infinity ? 0 : (v1 - v2 - E) / R;
+          let startIso = pt1, endIso = pt2;
+          if (branchCurrent < -0.001) {
+            startIso = pt2; endIso = pt1;
+          } 
+
+          const currentAbs = Math.abs(branchCurrent);
+          const hasFlow = currentAbs > 0.001;
+          const dist = Math.hypot(endIso.x - startIso.x, endIso.y - startIso.y);
+
+          const speed = Math.max(8, currentAbs * 120); 
+          const dashSpacing = 24 * scaleFactor;
+          const cycleDuration = dashSpacing / (speed * scaleFactor);
+
+          return (
+            <g key={c.id}>
+              {/* Ground Shadow Polygon */}
+              <polygon 
+                points={`${gLeft1.x},${gLeft1.y} ${gRight1.x},${gRight1.y} ${gRight2.x},${gRight2.y} ${gLeft2.x},${gLeft2.y}`} 
+                fill="#0f172a" opacity="0.6" 
+              />
+              
+              {/* Voltage Height Visualizers (Center lines) */}
+              <line x1={toIso(n1.x, n1.y, minV).x} y1={toIso(n1.x, n1.y, minV).y} x2={pt1.x} y2={pt1.y} stroke="#475569" strokeWidth={1 * scaleFactor} strokeDasharray={`${4*scaleFactor} ${4*scaleFactor}`} />
+              <line x1={toIso(n2.x, n2.y, minV).x} y1={toIso(n2.x, n2.y, minV).y} x2={pt2.x} y2={pt2.y} stroke="#475569" strokeWidth={1 * scaleFactor} strokeDasharray={`${4*scaleFactor} ${4*scaleFactor}`} />
+
+              {/* Elevated Flat Track Polygon */}
+              <polygon 
+                points={`${pLeft1.x},${pLeft1.y} ${pRight1.x},${pRight1.y} ${pRight2.x},${pRight2.y} ${pLeft2.x},${pLeft2.y}`} 
+                fill={trackColor} 
+                stroke="#1e293b" 
+                strokeWidth={1 * scaleFactor} 
+                strokeLinejoin="round" 
+              />
+              
+              {/* Track Edges/Rails for architectural detail */}
+              <line x1={pLeft1.x} y1={pLeft1.y} x2={pLeft2.x} y2={pLeft2.y} stroke="#0f172a" strokeWidth={1.5 * scaleFactor} />
+              <line x1={pRight1.x} y1={pRight1.y} x2={pRight2.x} y2={pRight2.y} stroke="#0f172a" strokeWidth={1.5 * scaleFactor} />
+
+              {/* Continuous Stream of Flowing Charge Beads (down the center pt1 -> pt2) */}
+              {hasFlow && dist > 1 && (
+                <line
+                  x1={startIso.x} y1={startIso.y} x2={endIso.x} y2={endIso.y}
+                  stroke="#facc15"
+                  strokeWidth={8 * scaleFactor}
+                  strokeDasharray={`0 ${dashSpacing}`}
+                  strokeLinecap="round"
+                >
+                  <animate 
+                    attributeName="stroke-dashoffset" 
+                    from={dashSpacing} 
+                    to="0" 
+                    dur={`${cycleDuration}s`} 
+                    repeatCount="indefinite" 
+                  />
+                </line>
+              )}
+
+              {/* Label - Anchored relative to the screen to always point UP regardless of rotation */}
+              {c.val > 0 && (
+                <text 
+                  x={(pt1.x + pt2.x) / 2} 
+                  y={(pt1.y + pt2.y) / 2 - (40 * scaleFactor)} 
+                  fill={isBattery ? "#4ade80" : "#f87171"} 
+                  fontSize={13 * scaleFactor} fontWeight="bold" textAnchor="middle" className="drop-shadow-md"
+                >
+                  {c.val}{isBattery ? 'V' : 'Ω'}
+                </text>
+              )}
+            </g>
+          );
+        })}
+      </svg>
+    </div>
+  );
+};
+
+
+export default function App() {
+  const [components, setComponents] = useState([]);
+  const [selectedTool, setSelectedTool] = useState('wire');
+  const [startNode, setStartNode] = useState(null);
+  const [hoverNode, setHoverNode] = useState(null);
+  const [selectedCompId, setSelectedCompId] = useState(null);
+
+  // AI State
+  const [aiMode, setAiMode] = useState('chat'); // 'chat' or 'generate'
+  const [genPrompt, setGenPrompt] = useState('');
+  const [isGenerating, setIsGenerating] = useState(false);
+  const [genAnalysis, setGenAnalysis] = useState('');
+
+  // Chat State
+  const [chatMessages, setChatMessages] = useState([
+    { role: 'model', text: "Hi! I'm your AI Physics Tutor. Ask me any questions about the circuit you're building, or hit 'Analyze Circuit' for a quick breakdown!" }
+  ]);
+  const [chatInput, setChatInput] = useState('');
+  const [isChatting, setIsChatting] = useState(false);
+  const chatScrollRef = useRef(null);
+  
+  // History State
+  const [history, setHistory] = useState([]);
+  const svgRef = useRef(null);
+
+  const tools = [
+    { id: 'select', icon: <MousePointer2 className="w-5 h-5" />, label: 'Select' },
+    { id: 'wire', icon: <Slash className="w-5 h-5" />, label: 'Wire' },
+    { id: 'battery', icon: <Zap className="w-5 h-5" />, label: 'Battery', defaultVal: 9 },
+    { id: 'resistor', icon: <Activity className="w-5 h-5" />, label: 'Resistor', defaultVal: 10 },
+    { id: 'ammeter', icon: <Circle className="w-5 h-5" />, label: 'Ammeter' },
+    { id: 'voltmeter', icon: <Circle className="w-5 h-5" />, label: 'Voltmeter' },
+    { id: 'delete', icon: <Trash2 className="w-5 h-5" />, label: 'Delete' },
+  ];
+
+  const simResult = useMemo(() => solveCircuit(components), [components]);
+
+  const pushHistory = () => {
+    setHistory(prev => [...prev, components]);
+  };
+
+  const handleUndo = () => {
+    if (history.length === 0) return;
+    const previousState = history[history.length - 1];
+    setComponents(previousState);
+    setHistory(prev => prev.slice(0, -1));
+    setSelectedCompId(null);
+    setStartNode(null);
+  };
+
+  const handleReset = () => {
+    if (components.length === 0) return;
+    pushHistory();
+    setComponents([]);
+    setSelectedCompId(null);
+    setStartNode(null);
+    setChatMessages([{ role: 'model', text: "Circuit reset! What should we build next?" }]);
+  };
+
+  // Auto-scroll chat to bottom
+  useEffect(() => {
+    if (chatScrollRef.current) {
+      chatScrollRef.current.scrollTop = chatScrollRef.current.scrollHeight;
+    }
+  }, [chatMessages]);
+
+  // --- NEW: Load KaTeX dynamically for AI Chat ---
+  useEffect(() => {
+    if (!document.getElementById('katex-css')) {
+      const link = document.createElement('link');
+      link.id = 'katex-css';
+      link.rel = 'stylesheet';
+      link.href = 'https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.css';
+      document.head.appendChild(link);
+    }
+    if (!document.getElementById('katex-js')) {
+      const script = document.createElement('script');
+      script.id = 'katex-js';
+      script.src = 'https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.js';
+      document.head.appendChild(script);
+    }
+  }, []);
+
+  // --- AI Feature: Chat & Analysis ---
+  const handleChatSubmit = async (e, overridePrompt = null) => {
+    if (e) e.preventDefault();
+    const promptToSend = overridePrompt || chatInput.trim();
+    if (!promptToSend || isChatting) return;
+
+    if (!overridePrompt) setChatInput('');
+    setChatMessages(prev => [...prev, { role: 'user', text: promptToSend }]);
+    setIsChatting(true);
+
+    try {
+      // Build dynamic context based on current circuit state
+      const circuitContext = JSON.stringify({
+        components: components.map(c => ({ type: c.type, val: c.val, connectedBetween: [c.n1, c.n2] })),
+        simError: simResult.error,
+        simulatedReadings: simResult.readings,
+        currents: simResult.currents
+      });
+
+      const systemInstruction = `You are a friendly, expert AI Physics Tutor integrated into a DC circuit simulator.
+      The user is interacting with an interactive canvas. Here is the CURRENT LIVE STATE of their circuit (in JSON format):
+      ${circuitContext}
+      
+      Instructions:
+      1. Answer the user's questions specifically about this circuit configuration.
+      2. Keep explanations concise, encouraging, and easy to understand for a student. ALWAYS use LaTeX formatting for math equations (e.g., $V = I \\times R$, $$P = I^2 R$$) and simple markdown for bolding.
+      3. Identify any issues like short circuits or open circuits if they exist.
+      4. If the circuit is empty and they ask a general question, answer it. If they ask about the circuit when it's empty, remind them to draw components or use the Generate tab.`;
+
+      const apiHistory = chatMessages.map(msg => ({
+        role: msg.role === 'model' ? 'model' : 'user',
+        parts: [{ text: msg.text }]
+      }));
+      apiHistory.push({ role: 'user', parts: [{ text: promptToSend }] });
+
+      const payload = {
+        contents: apiHistory,
+        systemInstruction: { parts: [{ text: systemInstruction }] }
+      };
+
+      const data = await fetchWithRetry(`https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-preview-09-2025:generateContent?key=${apiKey}`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload)
+      });
+
+      const text = data.candidates?.[0]?.content?.parts?.[0]?.text;
+      if (text) {
+        setChatMessages(prev => [...prev, { role: 'model', text: text }]);
+      } else {
+        throw new Error("No response generated.");
+      }
+    } catch (e) {
+      console.error(e);
+      setChatMessages(prev => [...prev, { role: 'model', text: "Sorry, I ran into an error processing your request. Please try again." }]);
+    } finally {
+      setIsChatting(false);
+    }
+  };
+
+  const handleQuickAnalyze = () => {
+    handleChatSubmit(null, "Can you analyze my current circuit and explain the readings?");
+  };
+
+  // --- AI Feature: Generate Circuit ---
+  const handleGenerateCircuit = async () => {
+    if (!genPrompt) return;
+    setIsGenerating(true);
+    setGenAnalysis('');
+    try {
+      const payload = {
+        contents: [{ parts: [{ text: `Generate a DC circuit based on this request: "${genPrompt}". Place components using free coordinates where X is between 100 and 700, and Y is between 100 and 500. Nodes must share exact 'X,Y' strings to connect. IMPORTANT: All X and Y coordinates MUST be exact multiples of 20 (e.g., 100, 120, 160). All components and wires MUST be strictly horizontal or vertical (meaning n1 and n2 must share exactly the same X coordinate, or exactly the same Y coordinate).` }] }],
+        systemInstruction: { parts: [{ text: "You are an expert electrical engineer designing educational circuits. Provide only valid layouts." }] },
+        generationConfig: {
+          responseMimeType: "application/json",
+          responseSchema: {
+            type: "ARRAY",
+            items: {
+              type: "OBJECT",
+              properties: {
+                type: { type: "STRING", enum: ["wire", "battery", "resistor", "ammeter", "voltmeter"] },
+                n1: { type: "STRING", description: "Node 1 format 'X,Y' (e.g., '2,2')" },
+                n2: { type: "STRING", description: "Node 2 format 'X,Y' (e.g., '2,5')" },
+                val: { type: "NUMBER", description: "Value (Volts for battery, Ohms for resistor, 0 otherwise)" }
+              },
+              required: ["type", "n1", "n2", "val"]
+            }
+          }
+        }
+      };
+      
+      const data = await fetchWithRetry(`https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-preview-09-2025:generateContent?key=${apiKey}`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload)
+      });
+      
+      const text = data.candidates?.[0]?.content?.parts?.[0]?.text;
+      if (text) {
+        const newComps = JSON.parse(text).map(c => ({...c, id: Math.random().toString(36).substr(2, 9)}));
+        pushHistory();
+        setComponents(newComps);
+        setGenAnalysis("✨ Circuit generated! Switch to Chat mode if you'd like me to analyze it.");
+      }
+    } catch (e) {
+      console.error(e);
+      setGenAnalysis("Error generating circuit. Please try again.");
+    } finally {
+      setIsGenerating(false);
+    }
+  };
+
+  // --- Grid / Free Placement Logic ---
+  const VIEWBOX_W = 800;
+  const VIEWBOX_H = 600;
+
+  const getCoords = (e, currentStartNode = null) => {
+    if (!svgRef.current) return null;
+    const svg = svgRef.current;
+    
+    // Use native SVG matrix transformation for pixel-perfect accuracy regardless of viewport size
+    const pt = svg.createSVGPoint();
+    pt.x = e.clientX;
+    pt.y = e.clientY;
+    
+    const cursorPt = pt.matrixTransform(svg.getScreenCTM().inverse());
+    
+    const rawX = cursorPt.x;
+    const rawY = cursorPt.y;
+
+    // --- FIX 1: Prevent "Black Hole" Overlap ---
+    // SNAP_RADIUS is set to 10 (half of the 20px grid) so magnetic fields never overlap adjacent grid spots.
+    const SNAP_RADIUS = 10; 
+    let closestNodeStr = null;
+    let minDistance = Infinity;
+
+    const allNodes = new Set(components.flatMap(c => [c.n1, c.n2]));
+    
+    allNodes.forEach(nodeStr => {
+      // --- FIX 2: Ignore Start Node ---
+      // Prevent the cursor from violently snapping back to the node you are dragging away from.
+      if (nodeStr === currentStartNode) return;
+
+      const { x, y } = parseNode(nodeStr);
+      const dist = Math.hypot(x - rawX, y - rawY);
+
+      // If drawing, ONLY allow magnetic snapping to nodes that form a perfectly straight line
+      if (currentStartNode) {
+        const start = parseNode(currentStartNode);
+        const isOrthogonal = Math.abs(x - start.x) < 1 || Math.abs(y - start.y) < 1;
+        if (!isOrthogonal) return;
+      }
+
+      if (dist < minDistance && dist <= SNAP_RADIUS) {
+        minDistance = dist;
+        closestNodeStr = nodeStr;
+      }
+    });
+
+    // If we are hovering near a valid existing node, magnetically snap to it!
+    if (closestNodeStr) {
+      return { id: closestNodeStr, ...parseNode(closestNodeStr) };
+    }
+
+    // --- FIX 3: Strict Grid & Orthogonal Lock for empty space ---
+    const GRID_SIZE = 20;
+    let snapX = Math.round(rawX / GRID_SIZE) * GRID_SIZE;
+    let snapY = Math.round(rawY / GRID_SIZE) * GRID_SIZE;
+
+    if (currentStartNode) {
+      const start = parseNode(currentStartNode);
+      const dx = Math.abs(rawX - start.x);
+      const dy = Math.abs(rawY - start.y);
+      
+      // Lock to whichever axis the user is dragging along the most
+      if (dx > dy) {
+        snapY = start.y; 
+      } else {
+        snapX = start.x; 
+      }
+    }
+
+    return { id: `${snapX},${snapY}`, x: snapX, y: snapY };
+  };
+
+  const handleMouseMove = (e) => {
+    // Pass startNode so we can lock the axis while drawing
+    const coords = getCoords(e, startNode);
+    if (coords) setHoverNode(coords.id);
+  };
+
+  const handleGridClick = (e) => {
+    // Pass startNode
+    const coords = getCoords(e, startNode);
+    if (!coords) return;
+
+    if (selectedTool === 'select' || selectedTool === 'delete') {
+      setStartNode(null);
+      return;
+    }
+
+    if (!startNode) {
+      setStartNode(coords.id);
+    } else {
+      if (startNode !== coords.id) {
+        const toolInfo = tools.find(t => t.id === selectedTool);
+        const newComp = {
+          id: Math.random().toString(36).substr(2, 9),
+          type: selectedTool,
+          n1: startNode,
+          n2: coords.id,
+          val: toolInfo.defaultVal || 0
+        };
+        pushHistory();
+        setComponents([...components, newComp]);
+        setSelectedCompId(newComp.id);
+      }
+      setStartNode(null); 
+    }
+  };
+
+  const handleComponentClick = (e, id) => {
+    e.stopPropagation(); 
+    if (selectedTool === 'delete') {
+      pushHistory();
+      setComponents(components.filter(c => c.id !== id));
+      if (selectedCompId === id) setSelectedCompId(null);
+    } else if (selectedTool === 'select') {
+      setSelectedCompId(id);
+    }
+  };
+
+  const selectedComp = components.find(c => c.id === selectedCompId);
+
+  const renderComponent = (comp, isGhost = false) => {
+    const p1 = parseNode(comp.n1);
+    const p2 = parseNode(comp.n2);
+    const dx = p2.x - p1.x;
+    const dy = p2.y - p1.y;
+    const length = Math.hypot(dx, dy);
+    const angle = Math.atan2(dy, dx) * (180 / Math.PI);
+    
+    const midX = (p1.x + p2.x) / 2;
+    const midY = (p1.y + p2.y) / 2;
+
+    const isSelected = selectedCompId === comp.id && !isGhost;
+    const strokeColor = isGhost ? 'rgba(148, 163, 184, 0.5)' : isSelected ? '#3b82f6' : '#e2e8f0';
+    const strokeWidth = 2.5;
+
+    let path = null;
+    let label = null;
+
+    if (comp.type === 'wire') {
+      path = <line x1="0" y1="0" x2={length} y2="0" stroke={strokeColor} strokeWidth={strokeWidth} />;
+    } else if (comp.type === 'resistor') {
+      const zigWidth = 8;
+      const zigHeight = 12;
+      const numZigs = Math.max(1, Math.floor((length - 20) / zigWidth));
+      const startX = (length - numZigs * zigWidth) / 2;
+      
+      let d = `M 0 0 L ${startX} 0`;
+      for(let i=0; i<numZigs; i++) {
+        d += ` L ${startX + i*zigWidth + zigWidth/4} ${i%2===0 ? zigHeight : -zigHeight}`;
+        d += ` L ${startX + i*zigWidth + zigWidth*3/4} ${i%2===0 ? -zigHeight : zigHeight}`;
+      }
+      d += ` L ${startX + numZigs*zigWidth} 0 L ${length} 0`;
+      path = <path d={d} fill="none" stroke={strokeColor} strokeWidth={strokeWidth} strokeLinejoin="round" />;
+      label = `${comp.val} Ω`;
+    } else if (comp.type === 'battery') {
+      const mid = length / 2;
+      const gap = 12;
+      path = (
+        <g stroke={strokeColor}>
+          <line x1="0" y1="0" x2={mid - gap/2} y2="0" strokeWidth={strokeWidth} />
+          <line x1={mid + gap/2} y1="0" x2={length} y2="0" strokeWidth={strokeWidth} />
+          <line x1={mid - gap/2} y1="-16" x2={mid - gap/2} y2="16" strokeWidth="2" />
+          <line x1={mid + gap/2} y1="-8" x2={mid + gap/2} y2="8" strokeWidth="5" />
+        </g>
+      );
+      label = `${comp.val} V`;
+    } else if (comp.type === 'ammeter' || comp.type === 'voltmeter') {
+      const mid = length / 2;
+      const isA = comp.type === 'ammeter';
+      path = (
+        <g stroke={strokeColor}>
+          <line x1="0" y1="0" x2={mid - 16} y2="0" strokeWidth={strokeWidth} />
+          <line x1={mid + 16} y1="0" x2={length} y2="0" strokeWidth={strokeWidth} />
+          <circle cx={mid} cy="0" r="16" fill="#0f172a" strokeWidth={strokeWidth} />
+          <text x={mid} y="5" textAnchor="middle" fill={strokeColor} className="font-bold text-sm font-sans">{isA ? 'A' : 'V'}</text>
+        </g>
+      );
+    }
+
+    let readout = null;
+    if (!isGhost && !simResult.error) {
+      if (comp.type === 'ammeter' && simResult.readings[comp.id] !== undefined) {
+        readout = `${simResult.readings[comp.id].toFixed(2)} A`;
+      } else if (comp.type === 'voltmeter' && simResult.readings[comp.id] !== undefined) {
+        readout = `${Math.abs(simResult.readings[comp.id]).toFixed(2)} V`;
+      } else if ((comp.type === 'wire' || comp.type === 'resistor') && simResult.currents[comp.id] !== undefined) {
+        const current = simResult.currents[comp.id];
+        if (current > 0.001) readout = `${current.toFixed(2)} A`;
+      }
+    }
+
+    return (
+      <g key={comp.id || 'ghost'} className={isGhost ? 'pointer-events-none' : 'cursor-pointer'}>
+        {!isGhost && (
+          <line 
+            x1={p1.x} y1={p1.y} x2={p2.x} y2={p2.y} 
+            stroke="transparent" strokeWidth="25" 
+            onClick={(e) => handleComponentClick(e, comp.id)} 
+          />
+        )}
+        
+        <g transform={`translate(${p1.x}, ${p1.y}) rotate(${angle})`}>
+          {path}
+        </g>
+
+        {label && (
+          <text 
+            x={midX} y={midY - 20} 
+            textAnchor="middle" fill="#94a3b8" 
+            className="text-xs font-semibold pointer-events-none"
+          >
+            {label}
+          </text>
+        )}
+
+        {readout && (
+          <text 
+            x={midX} y={midY + 24} 
+            textAnchor="middle" fill="#facc15" 
+            className="text-xs font-bold pointer-events-none drop-shadow-md"
+          >
+            {readout}
+          </text>
+        )}
+      </g>
+    );
+  };
+
+  return (
+    <div className="min-h-screen bg-slate-950 text-slate-200 font-sans p-4 md:p-6 flex flex-col items-center overflow-x-hidden">
+      
+      {/* Header */}
+      <header className="max-w-[1600px] w-full mb-6 flex justify-between items-center border-b border-slate-800 pb-4">
+        <div>
+          <h1 className="text-2xl font-bold text-white flex items-center gap-2">
+            <Zap className="text-yellow-400" /> Interactive Circuit Builder
+          </h1>
+          <p className="text-slate-400 text-sm mt-1">Design DC circuits, monitor values, and view the roller coaster analogy.</p>
+        </div>
+        {simResult.error && (
+          <div className="flex items-center gap-2 bg-red-900/30 text-red-400 px-4 py-2 rounded-lg border border-red-800/50">
+            <AlertCircle className="w-5 h-5" />
+            <span className="text-sm font-medium">Circuit topology error (e.g., shorted battery).</span>
+          </div>
+        )}
+      </header>
+
+      {/* Main Layout Grid */}
+      <div className="max-w-[1600px] w-full grid grid-cols-1 lg:grid-cols-8 xl:grid-cols-12 gap-6">
+        
+        {/* 1. Left Sidebar (Tools & Chat) */}
+        <div className="lg:col-span-3 xl:col-span-3 flex flex-col gap-4">
+          
+          {/* AI Assistant Panel */}
+          <div className="bg-slate-900 border border-slate-800 rounded-2xl shadow-xl flex flex-col h-[380px] overflow-hidden">
+            <div className="flex border-b border-slate-800">
+              <button 
+                onClick={() => setAiMode('chat')}
+                className={`flex-1 py-3 text-xs font-bold uppercase tracking-wider flex items-center justify-center gap-2 transition-colors ${aiMode === 'chat' ? 'bg-slate-800 text-blue-400' : 'text-slate-500 hover:text-slate-300 hover:bg-slate-800/50'}`}
+              >
+                <MessageSquare className="w-4 h-4" /> Chat
+              </button>
+              <button 
+                onClick={() => setAiMode('generate')}
+                className={`flex-1 py-3 text-xs font-bold uppercase tracking-wider flex items-center justify-center gap-2 transition-colors ${aiMode === 'generate' ? 'bg-slate-800 text-purple-400' : 'text-slate-500 hover:text-slate-300 hover:bg-slate-800/50'}`}
+              >
+                <Sparkles className="w-4 h-4" /> Generate
+              </button>
+            </div>
+
+            {/* Chat Mode */}
+            {aiMode === 'chat' && (
+              <>
+                <div ref={chatScrollRef} className="flex-1 overflow-y-auto p-4 space-y-4 bg-slate-900/50">
+                  {chatMessages.map((msg, i) => (
+                    <div key={i} className={`flex ${msg.role === 'user' ? 'justify-end' : 'justify-start'}`}>
+                      {/* Changed to remove whitespace-pre-wrap as FormattedMessage handles it now */}
+                      <div className={`max-w-[90%] rounded-2xl px-3 py-2 text-xs leading-relaxed ${
+                        msg.role === 'user' ? 'bg-blue-600 text-white rounded-br-none' : 'bg-slate-800 border border-slate-700 text-slate-200 rounded-bl-none'
+                      }`}>
+                        <FormattedMessage text={msg.text} />
+                      </div>
+                    </div>
+                  ))}
+                  {isChatting && (
+                    <div className="flex justify-start">
+                      <div className="bg-slate-800 border border-slate-700 rounded-2xl rounded-bl-none px-3 py-2">
+                        <Loader2 className="w-3 h-3 text-slate-400 animate-spin" />
+                      </div>
+                    </div>
+                  )}
+                </div>
+                
+                <div className="p-3 border-t border-slate-800 bg-slate-900">
+                  {components.length > 0 && (
+                    <button onClick={handleQuickAnalyze} disabled={isChatting} className="w-full mb-2 bg-slate-800 hover:bg-slate-700 text-slate-300 text-xs py-1.5 rounded-lg transition-colors flex items-center justify-center gap-1 border border-slate-700">
+                      <Bot className="w-3 h-3 text-emerald-400" /> Analyze Current Circuit
+                    </button>
+                  )}
+                  <form onSubmit={handleChatSubmit} className="flex gap-2">
+                    <input 
+                      type="text" value={chatInput} onChange={(e) => setChatInput(e.target.value)}
+                      placeholder="Ask about your circuit..." disabled={isChatting}
+                      className="flex-1 bg-slate-800 text-xs text-slate-200 px-3 py-2 rounded-lg border border-slate-700 focus:outline-none focus:border-blue-500 placeholder:text-slate-500 disabled:opacity-50"
+                    />
+                    <button type="submit" disabled={isChatting || !chatInput.trim()} className="bg-blue-600 hover:bg-blue-500 disabled:bg-slate-800 disabled:text-slate-500 text-white p-2 rounded-lg transition-colors flex items-center justify-center">
+                      <Send className="w-4 h-4" />
+                    </button>
+                  </form>
+                </div>
+              </>
+            )}
+
+            {/* Generate Mode */}
+            {aiMode === 'generate' && (
+              <div className="flex-1 flex flex-col p-4 space-y-4">
+                <p className="text-xs text-slate-400 leading-relaxed">
+                  Describe a circuit and AI will build it for you on the canvas. 
+                </p>
+                <textarea 
+                  placeholder="E.g. A 9V battery with two 100-ohm resistors in parallel and a voltmeter." 
+                  value={genPrompt} onChange={(e) => setGenPrompt(e.target.value)}
+                  className="w-full h-24 resize-none bg-slate-800 text-xs text-slate-200 p-3 rounded-lg border border-slate-700 focus:outline-none focus:border-purple-500 placeholder:text-slate-500"
+                />
+                <button onClick={handleGenerateCircuit} disabled={isGenerating || !genPrompt} className="w-full flex justify-center items-center gap-2 bg-purple-600 hover:bg-purple-500 disabled:bg-purple-900/50 disabled:text-slate-400 text-white px-3 py-2.5 rounded-lg text-xs font-bold transition-colors">
+                  {isGenerating ? <Loader2 className="w-4 h-4 animate-spin" /> : <Sparkles className="w-4 h-4" />}
+                  {isGenerating ? "Building..." : "Build Circuit"}
+                </button>
+                {genAnalysis && <div className="bg-emerald-900/20 border border-emerald-800/30 p-3 rounded-xl text-xs text-emerald-300">{genAnalysis}</div>}
+              </div>
+            )}
+          </div>
+
+          <div className="bg-slate-900 border border-slate-800 p-4 rounded-2xl shadow-xl space-y-2">
+            <div className="flex justify-between items-center mb-4">
+              <h2 className="text-xs font-bold text-slate-500 uppercase tracking-wider">Tools</h2>
+              <div className="flex gap-2">
+                <button onClick={handleUndo} disabled={history.length === 0} className="p-1.5 text-slate-400 hover:text-white disabled:opacity-30 disabled:hover:text-slate-400 rounded-md hover:bg-slate-800 transition-colors" title="Undo">
+                  <Undo2 className="w-4 h-4" />
+                </button>
+                <button onClick={handleReset} disabled={components.length === 0} className="p-1.5 text-slate-400 hover:text-red-400 disabled:opacity-30 disabled:hover:text-slate-400 rounded-md hover:bg-slate-800 transition-colors" title="Reset Circuit">
+                  <RotateCcw className="w-4 h-4" />
+                </button>
+              </div>
+            </div>
+            {tools.map(tool => (
+              <button
+                key={tool.id}
+                onClick={() => { setSelectedTool(tool.id); setStartNode(null); }}
+                className={`w-full flex items-center gap-3 px-4 py-2.5 rounded-xl transition-all ${selectedTool === tool.id ? 'bg-blue-600 text-white shadow-lg shadow-blue-900/20' : 'bg-slate-800/50 text-slate-300 hover:bg-slate-700 hover:text-white'}`}
+              >
+                {tool.icon}
+                <span className="font-medium text-sm">{tool.label}</span>
+              </button>
+            ))}
+          </div>
+
+          {/* Properties Panel */}
+          <div className={`bg-slate-900 border border-slate-800 p-4 rounded-2xl shadow-xl transition-opacity duration-300 ${selectedComp ? 'opacity-100' : 'opacity-50 pointer-events-none'}`}>
+             <h2 className="text-xs font-bold text-slate-500 uppercase tracking-wider mb-4 flex items-center gap-2">
+              <Settings className="w-4 h-4" /> Properties
+             </h2>
+             
+             {selectedComp ? (
+               <div className="space-y-4">
+                  <div><span className="text-sm font-medium capitalize text-slate-300">{selectedComp.type}</span></div>
+                  {(selectedComp.type === 'battery' || selectedComp.type === 'resistor') && (
+                    <div className="space-y-2">
+                      <label className="text-xs text-slate-400 flex justify-between">
+                        Value <span className="text-blue-400 font-mono">{selectedComp.val} {selectedComp.type === 'battery' ? 'V' : 'Ω'}</span>
+                      </label>
+                      <input 
+                        type="range" min={selectedComp.type === 'battery' ? 1 : 10} max={selectedComp.type === 'battery' ? 100 : 1000} step={selectedComp.type === 'battery' ? 1 : 10}
+                        value={selectedComp.val} onPointerDown={() => pushHistory()}
+                        onChange={(e) => setComponents(components.map(c => c.id === selectedComp.id ? { ...c, val: Number(e.target.value) } : c))}
+                        className="w-full accent-blue-500"
+                      />
+                    </div>
+                  )}
+                  {selectedComp.type === 'battery' && (
+                    <button
+                      onClick={() => {
+                        pushHistory();
+                        setComponents(components.map(c => c.id === selectedComp.id ? { ...c, n1: c.n2, n2: c.n1 } : c));
+                      }}
+                      className="w-full flex items-center justify-center gap-2 bg-slate-800 hover:bg-slate-700 text-slate-300 text-xs py-2 rounded-lg transition-colors border border-slate-700"
+                    >
+                      <ArrowLeftRight className="w-3 h-3" /> Reverse Polarity
+                    </button>
+                  )}
+                  {selectedComp.type !== 'battery' && selectedComp.type !== 'resistor' && (
+                    <p className="text-xs text-slate-500 italic">No adjustable values.</p>
+                  )}
+               </div>
+             ) : (
+               <p className="text-xs text-slate-500 italic">Select a component to edit.</p>
+             )}
+          </div>
+        </div>
+
+        {/* 2. Middle 2D Canvas */}
+        <div className="lg:col-span-5 xl:col-span-5 bg-[#0f172a] border border-slate-800 rounded-2xl shadow-2xl overflow-hidden relative touch-none min-h-[400px] xl:min-h-[600px]">
+          <div className="absolute top-4 left-4 bg-slate-900/80 backdrop-blur border border-slate-700/50 px-3 py-1.5 rounded-lg text-xs font-mono text-slate-300 z-10 flex gap-4 pointer-events-none">
+            <span>2D Top-Down View</span>
+            {startNode && <span className="text-blue-400">Drawing...</span>}
+          </div>
+
+          <svg 
+            ref={svgRef}
+            viewBox={`0 0 ${VIEWBOX_W} ${VIEWBOX_H}`} 
+            className="w-full h-full cursor-crosshair block"
+            onMouseMove={handleMouseMove}
+            onMouseDown={handleGridClick}
+          >
+            {/* --- FIX: Visual Blueprint Grid --- */}
+            <defs>
+              <pattern id="smallGrid" width="20" height="20" patternUnits="userSpaceOnUse">
+                <path d="M 20 0 L 0 0 0 20" fill="none" stroke="#1e293b" strokeWidth="0.5"/>
+              </pattern>
+              <pattern id="grid" width="100" height="100" patternUnits="userSpaceOnUse">
+                <rect width="100" height="100" fill="url(#smallGrid)"/>
+                <path d="M 100 0 L 0 0 0 100" fill="none" stroke="#334155" strokeWidth="1"/>
+              </pattern>
+            </defs>
+            <rect width="100%" height="100%" fill="url(#grid)" className="pointer-events-none" />
+
+            {Array.from(new Set(components.flatMap(c => [c.n1, c.n2]))).map(nodeStr => {
+              const { x, y } = parseNode(nodeStr);
+              return <circle key={nodeStr} cx={x} cy={y} r="4" fill="#475569" className="pointer-events-none" />;
+            })}
+            {components.map(comp => renderComponent(comp))}
+            {startNode && hoverNode && startNode !== hoverNode && selectedTool !== 'select' && selectedTool !== 'delete' && (
+              renderComponent({ type: selectedTool, n1: startNode, n2: hoverNode, val: tools.find(t => t.id === selectedTool)?.defaultVal }, true)
+            )}
+            {startNode && (
+              <circle cx={parseNode(startNode).x} cy={parseNode(startNode).y} r="6" fill="#3b82f6" opacity="0.5" className="pointer-events-none animate-pulse" />
+            )}
+          </svg>
+        </div>
+
+        {/* 3. Right 3D Roller Coaster Canvas */}
+        <div className="lg:col-span-8 xl:col-span-4 min-h-[400px] xl:min-h-[600px]">
+           <RollerCoasterView components={components} simResult={simResult} />
+        </div>
+
+      </div>
+    </div>
+  );
+}
